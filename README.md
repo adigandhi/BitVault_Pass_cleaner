@@ -17,7 +17,7 @@ When migrating to Bitwarden from other password managers or consolidating multip
 - **🏷️ Domain-Based Cleanup**: Groups entries by domain for more intelligent deduplication
 - **✨ Name Column Cleanup**: Automatically removes parentheses content from entry names
 - **⚙️ Multiple Cleaning Modes**:
-  - Interactive mode (manual selection)
+  - Interactive mode (arrow key navigation, URI-based grouping)
   - Auto mode (automatic domain-based cleanup)
   - Analyze mode (analysis only)
 - **🔍 Dry-Run Mode**: Preview changes without modifying files
@@ -51,9 +51,15 @@ pip install tqdm
    ```
 
 3. **Choose your cleaning mode**:
-   - `interactive` - Manual review and selection
+   - `interactive` - Manual review and selection with arrow key navigation
    - `auto` - Automatic domain-based deduplication
    - `analyze` - Analysis only (default)
+
+4. **Optional: Show passwords for decision-making**:
+   ```bash
+   python clean_pass.py -f your_export.csv --mode interactive --show-passwords
+   ```
+   ⚠️ **Warning**: Only use `--show-passwords` in secure environments. Passwords will be visible on screen.
 
 ### Example Sessions
 
@@ -106,6 +112,27 @@ Would keep: 1,207 entries
 🔍 DRY RUN: No files were saved.
 ```
 
+#### Interactive Mode with Password Visibility
+```
+$ python clean_pass.py -f export.csv --mode interactive --show-passwords
+
+🔍 INTERACTIVE DUPLICATE CLEANUP
+Now matching only on base URI (ignoring username/password)
+This allows you to clean up old/inactive accounts for the same service
+
+▶️ ⬜ [ 1] https://oldsite.com
+      👤 User: user@email.com
+      🔑 Password: oldpassword123
+      🏷️  Name: Old Account
+
+   ⬜ [ 2] https://oldsite.com
+      👤 User: user@email.com  
+      🔑 Password: newpassword456
+      🏷️  Name: Current Account
+
+Press ENTER to confirm, Q to skip, ESC to quit, ↑↓ to navigate, SPACE to toggle
+```
+
 #### Configuration and Undo
 ```
 $ python clean_pass.py --save-config
@@ -147,10 +174,12 @@ The script follows a multi-step approach:
 
 #### 👆 Interactive Mode
 
-- **Best for**: Smaller datasets or when you want control
-- **Logic**: Shows each duplicate group, lets you choose what to delete
+- **Best for**: Cleaning up old/inactive accounts for the same services
+- **Logic**: Groups entries by base URI only (ignores username/password), arrow key navigation
+- **Interface**: Modern keyboard navigation (↑↓ to navigate, SPACE to select, ENTER to confirm)
 - **Speed**: Slower (requires user input)
-- **Safety**: Highest (manual review)
+- **Safety**: Highest (manual review with visual interface)
+- **Use case**: Perfect for removing old accounts: `facebook.com` with old email vs new email
 
 #### 🤖 Auto Mode
 
@@ -205,6 +234,33 @@ For large files (1000+ entries), the script automatically shows progress bars:
 
 *Note: Requires `tqdm` package for enhanced progress bars. Falls back to simple indicators if not available.*
 
+### Interactive Mode Controls
+
+The enhanced interactive mode provides powerful keyboard navigation:
+
+**Navigation & Selection:**
+- **↑/↓ Arrow Keys**: Move between duplicate entries
+- **SPACE**: Toggle selection for deletion (❌/⬜)
+- **ENTER**: Confirm selections and proceed to next group
+- **Q**: Skip current group (leave all entries)
+- **ESC**: Exit interactive mode completely (process deletions so far)
+
+**Password Visibility:**
+```bash
+# Show masked passwords (default - secure)
+python clean_pass.py -f export.csv --mode interactive
+
+# Show actual passwords (use with caution)
+python clean_pass.py -f export.csv --mode interactive --show-passwords
+```
+
+**Entry Information Displayed:**
+- 🌐 **URI**: Full login URL
+- 👤 **Username**: Login username
+- 🔑 **Password**: Masked (●●●●●●●) or visible based on `--show-passwords`
+- 🏷️ **Name**: Entry name/title (if available)
+- 📅 **Created**: Creation date (if available)
+
 ### Backup and Restore
 
 List available backups:
@@ -221,6 +277,51 @@ The restore function can:
 - **Merge deleted entries** back with cleaned data
 - **Restore cleaned files** to original location
 - **Interactive selection** of which backup to restore
+
+### Enhanced Interactive Mode
+
+The interactive mode now features a modern keyboard-driven interface:
+
+```
+🔍 INTERACTIVE DUPLICATE SELECTION
+============================================================
+Group: Base URI: facebook.com (1/3)
+============================================================
+
+📋 Instructions:
+  ↑↓ : Navigate between entries
+  SPACE: Toggle selection for deletion
+  ENTER: Confirm selections
+  Q: Skip this group
+  ESC: Quit interactive mode completely
+
+🗂️  Entries (❌ = selected for deletion):
+------------------------------------------------------------
+
+▶️ ⬜ [ 1] https://facebook.com
+      👤 User: old.email@gmail.com
+      🔑 Password: ******* (7 chars)
+      🏷️  Name: Facebook (old account)
+
+   ❌ [ 2] https://m.facebook.com
+      👤 User: current.email@gmail.com
+
+   ⬜ [ 3] https://www.facebook.com
+      👤 User: backup.email@yahoo.com
+
+📊 Summary: 1 of 3 entries selected for deletion
+
+Press ENTER to confirm, Q to skip, ↑↓ to navigate, SPACE to toggle selection
+```
+
+**Key Improvements:**
+- **URI-only matching**: Groups by base URI, ignoring username/password differences
+- **Visual navigation**: Arrow keys to move, space bar to select
+- **Clear indicators**: ▶️ shows current position, ❌ shows selected for deletion
+- **Password visibility**: Optional `--show-passwords` flag to show actual passwords vs masked
+- **Early exit**: ESC key to quit interactive mode without processing all groups
+- **Cross-platform**: Works on Windows, macOS, and Linux
+- **Fallback support**: Automatic fallback to text input if keyboard navigation fails
 
 ## 🔧 Core Functions
 

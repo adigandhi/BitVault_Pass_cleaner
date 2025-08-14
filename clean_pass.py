@@ -10,6 +10,16 @@ import datetime
 import shutil
 from glob import glob
 
+# For interactive keyboard input
+try:
+    import select
+    import termios
+    import tty
+    UNIX_TERMINAL = True
+except ImportError:
+    # Windows doesn't have these modules
+    UNIX_TERMINAL = False
+
 # Optional progress bar support
 try:
     from tqdm import tqdm
@@ -53,6 +63,215 @@ except ImportError:
         def close(self):
             if self.desc:
                 print(f"{self.desc} complete.")
+
+class KeyboardInput:
+    """Handle keyboard input for interactive selection."""
+    
+    def __init__(self):
+        self.old_settings = None
+    
+    def __enter__(self):
+        if UNIX_TERMINAL:
+            self.old_settings = termios.tcgetattr(sys.stdin)
+            tty.setraw(sys.stdin.fileno())
+        return self
+    
+    def __exit__(self, type, value, traceback):
+        if UNIX_TERMINAL and self.old_settings:
+            termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.old_settings)
+    
+    def get_key(self):
+        """Get a single keypress."""
+        if sys.platform == 'win32':
+            try:
+                import msvcrt
+                if msvcrt.kbhit():
+                    key = msvcrt.getch()
+                    if key == b'\xe0':  # Arrow key prefix on Windows
+                        key = msvcrt.getch()
+                        if key == b'H': return 'UP'
+                        elif key == b'P': return 'DOWN'
+                        elif key == b'K': return 'LEFT'
+                        elif key == b'M': return 'RIGHT'
+                    elif key == b' ': return 'SPACE'
+                    elif key == b'\r': return 'ENTER'
+                    elif key == b'\x03': return 'CTRL_C'
+                    elif key == b'\x1b': return 'ESC'  # ESC key
+                    elif key in [b'q', b'Q']: return 'QUIT'
+                    return key.decode('utf-8', errors='ignore')
+                return None
+            except ImportError:
+                return None
+        elif UNIX_TERMINAL:
+            if select.select([sys.stdin], [], [], 0.1) == ([sys.stdin], [], []):
+                char = sys.stdin.read(1)
+                if char == '\x1b':  # ESC sequence
+                    # Try to read more characters for arrow keys
+                    try:
+                        next_chars = sys.stdin.read(2)
+                        if next_chars == '[A': return 'UP'
+                        elif next_chars == '[B': return 'DOWN'
+                        elif next_chars == '[C': return 'RIGHT'
+                        elif next_chars == '[D': return 'LEFT'
+                        else:
+                            return 'ESC'  # Plain ESC key
+                    except:
+                        return 'ESC'  # Plain ESC key
+                elif char == ' ': return 'SPACE'
+                elif char == '\r' or char == '\n': return 'ENTER'
+                elif char == '\x03': return 'CTRL_C'
+                elif char == 'q' or char == 'Q': return 'QUIT'
+                return char
+            return None
+        else:
+            # Fallback for systems without terminal support
+            return None
+
+def display_duplicate_group_interactive(group_df, group_info, selected_indices=None):
+    """Display a group of duplicates with interactive selection."""
+    if selected_indices is None:
+        selected_indices = set()
+    
+    os.system('clear' if os.name == 'posix' else 'cls')
+    
+    print("🔍 INTERACTIVE DUPLICATE SELECTION")
+    print("=" * 60)
+    print(f"Group: {group_info}")
+    print("=" * 60)
+    print()
+    print("📋 Instructions:")
+    print("  ↑↓ : Navigate between entries")
+    print("  SPACE: Toggle selection for deletion")
+    print("  ENTER: Confirm selections")
+    print("  Q: Skip this group")
+    print()
+    print("🗂️  Entries (❌ = selected for deletion):")
+    print("-" * 60)
+    
+    for idx, (_, row) in enumerate(group_df.iterrows()):
+        marker = "❌" if idx in selected_indices else "  "
+        print(f"{marker} [{idx + 1:2d}] {row['login_uri']}")
+        print(f"      👤 User: {row['login_username']}")
+        if 'name' in row and pd.notna(row['name']) and row['name'].strip():
+            print(f"      🏷️  Name: {row['name']}")
+        print()
+    
+    print(f"📊 Summary: {len(selected_indices)} of {len(group_df)} entries selected for deletion")
+    return len(group_df)
+
+def interactive_select_entries(group_df, group_info, show_passwords=False):
+    """Interactive selection of entries using arrow keys and space bar."""
+    selected_indices = set()
+    current_row = 0
+    total_rows = len(group_df)
+    
+    while True:
+        # Clear screen and display current state
+        os.system('clear' if os.name == 'posix' else 'cls')
+        
+        print("🔍 INTERACTIVE DUPLICATE SELECTION")
+        print("=" * 60)
+        print(f"Group: {group_info}")
+        print("=" * 60)
+        print()
+        print("📋 Instructions:")
+        print("  ↑↓ : Navigate between entries")
+        print("  SPACE: Toggle selection for deletion")
+        print("  ENTER: Confirm selections")
+        print("  Q: Skip this group")
+        print("  ESC: Quit interactive mode completely")
+        print()
+        print("🗂️  Entries (❌ = selected for deletion):")
+        print("-" * 60)
+        
+        # Display entries with highlighting
+        for idx, (_, row) in enumerate(group_df.iterrows()):
+            # Highlight current row
+            if idx == current_row:
+                print("▶️ ", end="")
+            else:
+                print("   ", end="")
+            
+            # Selection marker
+            marker = "❌" if idx in selected_indices else "⬜"
+            print(f"{marker} [{idx + 1:2d}] {row['login_uri']}")
+            
+            # User info
+            if idx == current_row:
+                print(f"      👤 User: {row['login_username']}")
+                if 'login_password' in row:
+                    if show_passwords:
+                        password_display = str(row['login_password']) if pd.notna(row['login_password']) else "[empty]"
+                        print(f"      🔑 Password: {password_display}")
+                    else:
+                        password_length = len(str(row['login_password'])) if pd.notna(row['login_password']) else 0
+                        print(f"      🔑 Password: {'*' * password_length} ({password_length} chars)")
+                if 'name' in row and pd.notna(row['name']) and row['name'].strip():
+                    print(f"      🏷️  Name: {row['name']}")
+                # Show creation date if available
+                if 'creation_date' in row and pd.notna(row['creation_date']):
+                    print(f"      📅 Created: {row['creation_date']}")
+            print()
+        
+        print(f"📊 Summary: {len(selected_indices)} of {total_rows} entries selected for deletion")
+        print()
+        print("Press ENTER to confirm, Q to skip, ↑↓ to navigate, SPACE to toggle selection")
+        
+        # Get keyboard input
+        try:
+            with KeyboardInput() as kb:
+                while True:
+                    key = kb.get_key()
+                    if key is None:
+                        continue
+                    
+                    if key == 'UP':
+                        current_row = (current_row - 1) % total_rows
+                        break
+                    elif key == 'DOWN':
+                        current_row = (current_row + 1) % total_rows
+                        break
+                    elif key == 'SPACE':
+                        if current_row in selected_indices:
+                            selected_indices.remove(current_row)
+                        else:
+                            selected_indices.add(current_row)
+                        break
+                    elif key == 'ENTER':
+                        return [group_df.iloc[i].name for i in selected_indices]
+                    elif key == 'QUIT' or key == 'CTRL_C':
+                        return []
+                    elif key == 'ESC':
+                        return 'QUIT_ALL'  # Special signal to quit all interactive mode
+                    
+        except KeyboardInterrupt:
+            return []
+        except Exception as e:
+            # Fallback to text input if keyboard handling fails
+            print(f"\n⚠️  Keyboard navigation not available ({e})")
+            print("Falling back to text input mode...")
+            
+            print("\nWhich entries would you like to DELETE?")
+            print("Enter row numbers (1-{}) separated by commas, or 'none' to keep all:".format(total_rows))
+            
+            while True:
+                try:
+                    user_input = input("Rows to delete: ").strip().lower()
+                    
+                    if user_input == 'none' or user_input == '':
+                        return []
+                    
+                    selected_rows = [int(x.strip()) for x in user_input.split(',')]
+                    
+                    if all(1 <= row <= total_rows for row in selected_rows):
+                        return [group_df.iloc[row - 1].name for row in selected_rows]
+                    else:
+                        print(f"Please enter numbers between 1 and {total_rows}")
+                        
+                except ValueError:
+                    print("Invalid input. Please enter numbers separated by commas or 'none'")
+                except KeyboardInterrupt:
+                    return []
 
 def setup_logging(verbose=False):
     """Setup logging configuration."""
@@ -494,10 +713,15 @@ def clean_name_column(df, logger=None):
     
     return df
 
-def interactive_delete_duplicates(csv_file_path, logger=None):
+def interactive_delete_duplicates(csv_file_path, logger=None, show_passwords=False):
+    """Interactive deletion with arrow key navigation, matching only on base URI."""
     try:
         df = pd.read_csv(csv_file_path)
         original_count = len(df)
+        
+        print("\n🔍 INTERACTIVE DUPLICATE CLEANUP")
+        print("Now matching only on base URI (ignoring username/password)")
+        print("This allows you to clean up old/inactive accounts for the same service")
         
         # First, automatically remove fully duplicate rows
         print("\n" + "=" * 50)
@@ -512,118 +736,101 @@ def interactive_delete_duplicates(csv_file_path, logger=None):
         df = normalize_urls(df, logger)
         df = clean_name_column(df, logger)
         
-        required_columns = ['login_uri', 'login_username']
+        required_columns = ['login_uri']
         missing_columns = [col for col in required_columns if col not in df.columns]
         
         if missing_columns:
             print(f"Error: Missing columns: {missing_columns}")
             return None
         
-        # Find rows with duplicate login_uri AND login_username combinations (using normalized URLs)
-        duplicate_uri_username_rows = df[df.duplicated(subset=['login_uri_normalized', 'login_username'], keep=False)]
+        # Find rows with duplicate login_uri (base URI only - changed from username+URI)
+        duplicate_uri_rows = df[df.duplicated(subset=['login_uri_normalized'], keep=False)]
         
-        if duplicate_uri_username_rows.empty:
-            print("\nNo remaining duplicate login_uri + login_username combinations found after removing fully duplicate rows.")
+        if duplicate_uri_rows.empty:
+            print("\nNo duplicate base URIs found after removing fully duplicate rows.")
             if fully_removed_count > 0:
                 print(f"Total cleanup: {fully_removed_count} fully duplicate rows removed.")
-            return df
+            # Clean up temporary columns
+            df_cleaned = df.drop(columns=['login_uri_normalized'], errors='ignore')
+            return df_cleaned
         
         print("\n" + "=" * 50)
-        print("STEP 2: Interactive partial duplicate cleanup")
+        print("STEP 2: Interactive URI-based duplicate cleanup")
         print("=" * 50)
-        print(f"Found {len(duplicate_uri_username_rows)} rows with duplicate login_uri + login_username combinations (after removing full duplicates)")
+        print(f"Found {len(duplicate_uri_rows)} rows with duplicate base URIs")
+        print("You'll be able to review each group and select accounts to remove")
         
         rows_to_delete = []
-        # Group by both normalized login_uri and login_username
-        unique_combinations = duplicate_uri_username_rows[['login_uri_normalized', 'login_username']].drop_duplicates()
+        # Group by normalized login_uri only (removed username grouping)
+        unique_uris = duplicate_uri_rows['login_uri_normalized'].drop_duplicates()
         
-        # Use progress bar if many combinations to process
-        combination_iterator = tqdm(unique_combinations.iterrows(), 
-                                   total=len(unique_combinations), 
-                                   desc="Processing duplicate groups") if TQDM_AVAILABLE and len(unique_combinations) > 10 else unique_combinations.iterrows()
+        print(f"\n📊 Processing {len(unique_uris)} unique base URIs with duplicates...")
         
-        for _, combination in combination_iterator:
-            uri_normalized = combination['login_uri_normalized']
-            username = combination['login_username']
-            
-            # Get all rows with this specific normalized login_uri + login_username combination
-            combo_group = df[(df['login_uri_normalized'] == uri_normalized) & (df['login_username'] == username)].copy()
-            # Store original indices before reset to avoid conflicts
-            combo_group['original_index'] = combo_group.index
-            combo_group.reset_index(drop=True, inplace=True)
-            
-            print(f"\n{'='*60}")
-            print(f"Duplicate group for login_uri (normalized): {uri_normalized}")
-            print(f"                         login_username: {username}")
-            print(f"{'='*60}")
-            
-            for idx, row in combo_group.iterrows():
-                print(f"\nRow {idx + 1}:")
-                for col in df.columns:
-                    if col != 'original_index':  # Don't show the temporary index column
-                        if col == 'login_password':
-                            print(f"  {col}: {'*' * len(str(row[col]))}")  # Mask password
-                        else:
-                            print(f"  {col}: {row[col]}")
-            
-            print(f"\nWhich rows would you like to DELETE for this combination?")
-            print(f"Enter row numbers (1-{len(combo_group)}) separated by commas, or 'none' to keep all:")
-            
-            while True:
-                try:
-                    user_input = input("Rows to delete: ").strip().lower()
-                    
-                    if user_input == 'none':
-                        break
-                    
-                    if user_input == '':
-                        print("Please enter row numbers or 'none'")
-                        continue
-                    
-                    selected_rows = [int(x.strip()) for x in user_input.split(',')]
-                    
-                    if all(1 <= row <= len(combo_group) for row in selected_rows):
-                        for row_num in selected_rows:
-                            original_index = combo_group.iloc[row_num - 1]['original_index']
-                            rows_to_delete.append(original_index)
-                        break
-                    else:
-                        print(f"Please enter numbers between 1 and {len(combo_group)}")
-                        
-                except ValueError:
-                    print("Invalid input. Please enter numbers separated by commas or 'none'")
+        # Process each URI group
+        total_groups = len(unique_uris)
+        current_group = 0
         
+        for uri_normalized in unique_uris:
+            current_group += 1
+            
+            # Get all rows with this specific normalized login_uri
+            uri_group = df[df['login_uri_normalized'] == uri_normalized].copy()
+            
+            if len(uri_group) < 2:  # Skip if only one entry
+                continue
+            
+            # Create group info for display
+            group_info = f"Base URI: {uri_normalized} ({current_group}/{total_groups})"
+            
+            # Use new interactive selection interface
+            selected_indices = interactive_select_entries(uri_group, group_info, show_passwords)
+            
+            # Check for quit signal
+            if selected_indices == 'QUIT_ALL':
+                print("\n\n🚪 Exiting interactive mode...")
+                print(f"📊 Processed {current_group-1} of {total_groups} groups before exit")
+                break
+            
+            # Add selected indices to deletion list
+            rows_to_delete.extend(selected_indices)
+        
+        # Process deletions
         if rows_to_delete:
             df_cleaned = df.drop(rows_to_delete)
             df_cleaned.reset_index(drop=True, inplace=True)
             
             # Remove the temporary columns from final output
-            temp_columns = ['login_uri_normalized', 'original_index']
-            df_cleaned = df_cleaned.drop(columns=[col for col in temp_columns if col in df_cleaned.columns], errors='ignore')
+            df_cleaned = df_cleaned.drop(columns=['login_uri_normalized'], errors='ignore')
             
-            print(f"\n{'='*50}")
-            print(f"SUMMARY:")
-            print(f"{'='*50}")
-            print(f"Original rows: {original_count}")
-            print(f"Fully duplicate rows removed: {fully_removed_count}")
-            print(f"Partial duplicate rows deleted: {len(rows_to_delete)}")
-            print(f"Total rows removed: {fully_removed_count + len(rows_to_delete)}")
-            print(f"Remaining rows: {len(df_cleaned)}")
+            # Final summary
+            os.system('clear' if os.name == 'posix' else 'cls')
+            print("✅ CLEANUP COMPLETE!")
+            print("=" * 50)
+            print(f"📊 SUMMARY:")
+            print("=" * 50)
+            print(f"Original rows: {original_count:,}")
+            print(f"Fully duplicate rows removed: {fully_removed_count:,}")
+            print(f"URI-based duplicates deleted: {len(rows_to_delete):,}")
+            print(f"Total rows removed: {fully_removed_count + len(rows_to_delete):,}")
+            print(f"Remaining rows: {len(df_cleaned):,}")
+            print()
+            print("🎉 Your password database has been cleaned!")
             
             return df_cleaned
         else:
-            print("\nNo partial duplicate rows selected for deletion.")
+            print("\n📋 No rows selected for deletion.")
             if fully_removed_count > 0:
                 print(f"Total cleanup: {fully_removed_count} fully duplicate rows removed.")
             
-            # Remove the temporary columns from final output
-            temp_columns = ['login_uri_normalized', 'original_index']
-            df = df.drop(columns=[col for col in temp_columns if col in df.columns], errors='ignore')
-            
-            return df
+            # Remove temporary columns
+            df_cleaned = df.drop(columns=['login_uri_normalized'], errors='ignore')
+            return df_cleaned
             
     except FileNotFoundError:
         print(f"Error: File '{csv_file_path}' not found.")
+        return None
+    except KeyboardInterrupt:
+        print("\n\n❌ Operation cancelled by user.")
         return None
     except Exception as e:
         print(f"Error processing CSV file: {e}")
@@ -1176,7 +1383,8 @@ def load_config(config_path=None):
         'mode': 'analyze',
         'verbose': False,
         'dry_run': False,
-        'output': None
+        'output': None,
+        'show_passwords': False
     }
     
     # Try to find config file
@@ -1213,11 +1421,13 @@ def save_config_template(config_path=None):
         "verbose": False,
         "dry_run": False,
         "output": None,
+        "show_passwords": False,
         "_settings_info": {
             "mode": "Options: analyze, interactive, auto",
             "verbose": "Boolean: true for detailed logging",
             "dry_run": "Boolean: true to preview changes without modifying files",
-            "output": "String: custom output file path (null for auto-generated)"
+            "output": "String: custom output file path (null for auto-generated)",
+            "show_passwords": "Boolean: true to show passwords in interactive mode (use with caution)"
         }
     }
     
@@ -1239,9 +1449,12 @@ def parse_arguments():
         epilog="""
 Examples:
   %(prog)s -f export.csv --mode interactive --verbose
+  %(prog)s -f export.csv --mode interactive --show-passwords
   %(prog)s -f export.csv --mode auto --dry-run
   %(prog)s -f export.csv --mode analyze
   %(prog)s --save-config  # Create configuration template
+  %(prog)s --list-backups export.csv  # Show available backups
+  %(prog)s --undo export.csv  # Restore from backups
 """
     )
     
@@ -1296,6 +1509,12 @@ Examples:
         help='List available backup files for the specified CSV file'
     )
     
+    parser.add_argument(
+        '--show-passwords',
+        action='store_true',
+        help='Show passwords in interactive mode (use with caution)'
+    )
+    
     return parser.parse_args()
 
 def main():
@@ -1334,6 +1553,8 @@ def main():
         config['dry_run'] = True
     if args.output:
         config['output'] = args.output
+    if args.show_passwords:
+        config['show_passwords'] = True
     
     # Ensure file argument is always from command line
     if not hasattr(args, 'file') or not args.file:
@@ -1409,7 +1630,7 @@ def main():
                 print("DRY RUN MODE: Cannot use dry-run with interactive mode")
                 return
             print("\nStarting interactive deletion...")
-            cleaned_df = interactive_delete_duplicates(csv_file, logger)
+            cleaned_df = interactive_delete_duplicates(csv_file, logger, config['show_passwords'])
         
         elif config['mode'] == 'auto':
             print("\nStarting automatic domain-based cleanup...")
