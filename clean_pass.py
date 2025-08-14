@@ -796,11 +796,18 @@ def interactive_delete_duplicates(csv_file_path, logger=None, show_passwords=Fal
         
         # Process deletions
         if rows_to_delete:
+            # Get deleted entries before dropping them
+            deleted_df = df.loc[rows_to_delete].copy()
+            
             df_cleaned = df.drop(rows_to_delete)
             df_cleaned.reset_index(drop=True, inplace=True)
             
             # Remove the temporary columns from final output
             df_cleaned = df_cleaned.drop(columns=['login_uri_normalized'], errors='ignore')
+            deleted_df = deleted_df.drop(columns=['login_uri_normalized'], errors='ignore')
+            
+            # Save deleted entries
+            save_deleted_entries(deleted_df, csv_file_path)
             
             # Final summary
             os.system('clear' if os.name == 'posix' else 'cls')
@@ -946,6 +953,37 @@ def automatic_delete_duplicates(csv_file_path, logger=None, dry_run=False):
         print(f"Error processing CSV file: {e}")
         return None, None
 
+def create_backup(original_path, logger=None):
+    """Create a backup of the original file before any modifications."""
+    try:
+        # Validate original file exists
+        if not Path(original_path).exists():
+            raise FileNotFoundError(f"Original file not found: {original_path}")
+        
+        base_name = original_path.rsplit('.', 1)[0]
+        extension = original_path.rsplit('.', 1)[1] if '.' in original_path else 'csv'
+        
+        # Add timestamp to backup files
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_path = f"{base_name}_backup_{timestamp}.{extension}"
+        
+        # Create backup using shutil for better file handling
+        shutil.copy2(original_path, backup_path)
+        
+        message = f"Original file backed up to: {backup_path}"
+        if logger:
+            logger.info(message)
+        print(f"💾 {message}")
+        
+        return backup_path
+        
+    except Exception as e:
+        error_msg = f"Error creating backup: {e}"
+        if logger:
+            logger.error(error_msg)
+        print(f"❌ {error_msg}")
+        return None
+
 def save_deleted_entries(deleted_df, original_path):
     """Save deleted entries to a backup file."""
     if deleted_df is None or deleted_df.empty:
@@ -974,6 +1012,7 @@ def list_backup_files(original_path):
     
     # Look for backup patterns
     backup_patterns = [
+        f"{base_name}_backup_*.{extension}",
         f"{base_name}_deleted_entries_*.{extension}",
         f"{base_name}_cleaned.{extension}"
     ]
@@ -998,7 +1037,9 @@ def list_backup_files(original_path):
         size_mb = file_path.stat().st_size / (1024 * 1024)
         mod_time = datetime.datetime.fromtimestamp(file_path.stat().st_mtime)
         
-        if "deleted_entries" in backup_file:
+        if "backup_" in backup_file:
+            file_type = "Original file backup"
+        elif "deleted_entries" in backup_file:
             file_type = "Deleted entries backup"
         elif "cleaned" in backup_file:
             file_type = "Cleaned data file"
@@ -1082,6 +1123,30 @@ def restore_from_backup(original_path, backup_file=None, interactive=True):
             print(f"Combined {len(cleaned_df)} cleaned + {len(deleted_df)} deleted = {len(restored_df)} total entries")
             print(f"Restored data saved to: {restore_path}")
             
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error during restoration: {e}")
+            return False
+    
+    elif "backup_" in selected_backup:
+        # This is an original file backup - copy it back to original location
+        print(f"\n🔄 Restoring original file from: {Path(selected_backup).name}")
+        
+        # Ask for confirmation before overwriting
+        if Path(original_path).exists():
+            print(f"⚠️  Warning: This will overwrite the current file: {original_path}")
+            if interactive:
+                confirm = input("Continue? (y/N): ").strip().lower()
+                if confirm != 'y':
+                    print("Restore cancelled.")
+                    return False
+        
+        try:
+            # Copy the backup to original location
+            shutil.copy2(selected_backup, original_path)
+            
+            print(f"✅ Successfully restored original file to: {original_path}")
             return True
             
         except Exception as e:
@@ -1592,6 +1657,14 @@ def main():
         if columns is None:
             logger.error("Failed to read CSV file")
             sys.exit(1)
+        
+        # Create backup before any modifications (skip for analyze mode)
+        if config['mode'] != 'analyze':
+            print("\n💾 Creating backup of original file...")
+            backup_path = create_backup(csv_file, logger)
+            if not backup_path:
+                print("❌ Failed to create backup. Aborting for safety.")
+                sys.exit(1)
         
         # Analysis phase
         print("\n" + "=" * 50)

@@ -25,7 +25,7 @@ When migrating to Bitwarden from other password managers or consolidating multip
 - **📊 Progress Indicators**: Visual progress bars for long-running operations
 - **🔄 Undo Functionality**: Restore from backup files with interactive selection
 - **🔒 Security First**: Masks passwords in output, never logs sensitive data
-- **💾 Backup Protection**: Automatically saves deleted entries for recovery
+- **💾 Automatic Backups**: Creates complete backup of original file before any changes
 - **📊 Detailed Reporting**: Shows what was cleaned and statistics
 
 ## 🚀 Quick Start
@@ -69,6 +69,9 @@ $ python clean_pass.py -f bitwarden_export.csv --mode interactive
 
 📄 Loaded configuration from: ~/.clean_pass_config.json
 ✓ CSV validation passed
+
+💾 Creating backup of original file...
+💾 Original file backed up to: bitwarden_export_backup_20241201_143020.csv
 
 CSV Columns:
 1. folder
@@ -142,12 +145,17 @@ $ python clean_pass.py --list-backups bitwarden_export.csv
 
 💾 Available backup files for bitwarden_export.csv:
 ============================================================
- 1. bitwarden_export_deleted_entries_20241201_143022.csv
+ 1. bitwarden_export_backup_20241201_143020.csv
+    Type: Original file backup
+    Size: 2.1 MB
+    Modified: 2024-12-01 14:30:20
+
+ 2. bitwarden_export_deleted_entries_20241201_143022.csv
     Type: Deleted entries backup
     Size: 0.2 MB
     Modified: 2024-12-01 14:30:22
 
- 2. bitwarden_export_cleaned.csv
+ 3. bitwarden_export_cleaned.csv
     Type: Cleaned data file
     Size: 1.8 MB
     Modified: 2024-12-01 14:30:20
@@ -167,8 +175,9 @@ The script follows a multi-step approach:
 2. **URL Normalization** - Standardizes URLs for better comparison  
 3. **Name Cleanup** - Removes parentheses content from entry names (e.g., "365.altium.com (<user@email.com>)" → "365.altium.com")
 4. **Duplicate Detection** - Finds entries with same URL + username
-5. **User Selection** - Allows manual duplicate resolution
-6. **Backup Creation** - Saves deleted entries for recovery
+5. **User Selection** - Allows manual duplicate resolution  
+6. **Backup Creation** - Creates complete backup of original file before changes
+7. **Deleted Entry Tracking** - Saves deleted entries for recovery
 
 ### Cleaning Modes Explained
 
@@ -192,6 +201,7 @@ The script follows a multi-step approach:
 
 | File | Description |
 |------|-------------|
+| `original_backup_YYYYMMDD_HHMMSS.csv` | Complete backup of original file (created before any changes) |
 | `original_cleaned.csv` | Your cleaned password database |
 | `original_deleted_entries_YYYYMMDD_HHMMSS.csv` | Timestamped backup of deleted entries |
 
@@ -274,7 +284,8 @@ python clean_pass.py --undo export.csv
 ```
 
 The restore function can:
-- **Merge deleted entries** back with cleaned data
+- **Restore original file** from complete backup (before any changes)
+- **Merge deleted entries** back with cleaned data  
 - **Restore cleaned files** to original location
 - **Interactive selection** of which backup to restore
 
@@ -353,9 +364,10 @@ Press ENTER to confirm, Q to skip, ↑↓ to navigate, SPACE to toggle selection
 
 ### Data Safety
 
-- **Always backup** your original Bitwarden export before running
-- **Test on a small subset** first if working with large datasets
-- **Review the `_deleted_entries.csv`** file before permanent deletion
+- **Automatic backups** - Complete backup of original file created before any changes
+- **Test on a small subset** first if working with large datasets  
+- **Review deleted entries** - Check `_deleted_entries.csv` files before permanent deletion
+- **Multiple restore options** - Restore original file or merge back deleted entries
 
 ### Performance
 
