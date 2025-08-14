@@ -4,6 +4,55 @@ import argparse
 import logging
 import sys
 from pathlib import Path
+import json
+import os
+import datetime
+import shutil
+from glob import glob
+
+# Optional progress bar support
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+    # Fallback progress indicator
+    class tqdm:
+        def __init__(self, iterable=None, total=None, desc=None, **kwargs):
+            self.iterable = iterable
+            self.total = total
+            self.desc = desc
+            self.current = 0
+            if desc:
+                print(f"{desc}...")
+        
+        def __iter__(self):
+            if self.iterable:
+                for item in self.iterable:
+                    yield item
+                    self.current += 1
+            return self
+        
+        def __enter__(self):
+            return self
+        
+        def __exit__(self, *args):
+            if self.desc:
+                print(f"{self.desc} complete.")
+        
+        def update(self, n=1):
+            self.current += n
+            if self.total and self.current % max(1, self.total // 10) == 0:
+                progress = (self.current / self.total) * 100
+                print(f"Progress: {progress:.0f}%")
+        
+        def set_description(self, desc):
+            self.desc = desc
+            print(f"{desc}...")
+        
+        def close(self):
+            if self.desc:
+                print(f"{self.desc} complete.")
 
 def setup_logging(verbose=False):
     """Setup logging configuration."""
@@ -17,16 +66,119 @@ def setup_logging(verbose=False):
     )
     return logging.getLogger(__name__)
 
-def validate_csv_file(csv_file_path):
-    """Validate that the CSV file exists and is readable."""
-    path = Path(csv_file_path)
-    if not path.exists():
-        raise FileNotFoundError(f"CSV file not found: {csv_file_path}")
-    if not path.is_file():
-        raise ValueError(f"Path is not a file: {csv_file_path}")
-    if path.stat().st_size == 0:
-        raise ValueError(f"CSV file is empty: {csv_file_path}")
-    return True
+class CSVValidationError(Exception):
+    """Custom exception for CSV validation errors."""
+    pass
+
+class BitwandenCSVValidator:
+    """Validator for Bitwarden CSV exports."""
+    
+    REQUIRED_COLUMNS = ['login_uri', 'login_username']
+    OPTIONAL_COLUMNS = ['folder', 'favorite', 'type', 'name', 'notes', 'fields', 
+                       'reprompt', 'login_password', 'login_totp']
+    
+    @staticmethod
+    def validate_file_exists(csv_file_path):
+        """Validate that the CSV file exists and is readable."""
+        path = Path(csv_file_path)
+        if not path.exists():
+            raise FileNotFoundError(f"CSV file not found: {csv_file_path}")
+        if not path.is_file():
+            raise ValueError(f"Path is not a file: {csv_file_path}")
+        if path.stat().st_size == 0:
+            raise ValueError(f"CSV file is empty: {csv_file_path}")
+        return True
+    
+    @staticmethod
+    def validate_csv_structure(df, logger=None):
+        """Validate CSV structure and content."""
+        errors = []
+        warnings = []
+        
+        # Check if DataFrame is empty
+        if df.empty:
+            errors.append("CSV file contains no data rows")
+        
+        # Check for required columns
+        missing_required = [col for col in BitwandenCSVValidator.REQUIRED_COLUMNS 
+                           if col not in df.columns]
+        if missing_required:
+            errors.append(f"Missing required columns: {missing_required}")
+        
+        # Check for suspicious column names (might indicate wrong CSV format)
+        expected_cols = set(BitwandenCSVValidator.REQUIRED_COLUMNS + BitwandenCSVValidator.OPTIONAL_COLUMNS)
+        actual_cols = set(df.columns)
+        unexpected_cols = actual_cols - expected_cols
+        
+        if len(unexpected_cols) > len(actual_cols) * 0.5:  # More than 50% unexpected
+            warnings.append(f"Many unexpected columns found: {list(unexpected_cols)[:5]}... "
+                          f"This might not be a Bitwarden CSV export")
+        
+        # Check for completely empty columns
+        empty_cols = [col for col in df.columns if df[col].isna().all()]
+        if empty_cols:
+            warnings.append(f"Completely empty columns found: {empty_cols}")
+        
+        # Check data quality in required columns
+        if 'login_uri' in df.columns:
+            empty_uris = df['login_uri'].isna().sum()
+            if empty_uris > 0:
+                warnings.append(f"{empty_uris} entries have empty login_uri")
+                
+        if 'login_username' in df.columns:
+            empty_usernames = df['login_username'].isna().sum()
+            if empty_usernames > 0:
+                warnings.append(f"{empty_usernames} entries have empty login_username")
+        
+        # Log findings
+        if logger:
+            if errors:
+                for error in errors:
+                    logger.error(f"CSV Validation Error: {error}")
+            if warnings:
+                for warning in warnings:
+                    logger.warning(f"CSV Validation Warning: {warning}")
+        
+        # Print critical issues
+        if errors:
+            print("❌ CSV Validation Errors:")
+            for error in errors:
+                print(f"   • {error}")
+        
+        if warnings:
+            print("⚠️  CSV Validation Warnings:")
+            for warning in warnings:
+                print(f"   • {warning}")
+        
+        if errors:
+            raise CSVValidationError(f"CSV validation failed: {'; '.join(errors)}")
+        
+        return len(warnings) == 0  # Return True if no warnings
+
+def validate_csv_file(csv_file_path, logger=None):
+    """Validate CSV file exists and has proper structure."""
+    try:
+        # Check file existence
+        BitwandenCSVValidator.validate_file_exists(csv_file_path)
+        
+        # Try to read and validate structure
+        df = pd.read_csv(csv_file_path, nrows=100)  # Read sample for validation
+        BitwandenCSVValidator.validate_csv_structure(df, logger)
+        
+        if logger:
+            logger.info(f"CSV validation passed for: {csv_file_path}")
+        
+        return True
+        
+    except (FileNotFoundError, ValueError, CSVValidationError) as e:
+        if logger:
+            logger.error(f"CSV validation failed: {e}")
+        raise
+    except Exception as e:
+        error_msg = f"Unexpected error during CSV validation: {e}"
+        if logger:
+            logger.error(error_msg)
+        raise CSVValidationError(error_msg)
 
 def get_file_size_mb(file_path):
     """Get file size in megabytes."""
@@ -63,7 +215,12 @@ def read_csv_and_print_columns(csv_file_path, logger=None):
             return df_sample.columns.tolist()
         
         else:
-            df = pd.read_csv(csv_file_path)
+            if TQDM_AVAILABLE and get_file_size_mb(csv_file_path) > 10:
+                print("📁 Loading large CSV file...")
+                df = pd.read_csv(csv_file_path)
+                print(f"✅ Loaded {len(df):,} rows successfully")
+            else:
+                df = pd.read_csv(csv_file_path)
             
             if logger:
                 logger.info(f"Successfully loaded CSV with {len(df)} rows and {len(df.columns)} columns")
@@ -172,30 +329,48 @@ def find_duplicate_uri_and_username(csv_file_path, logger=None):
         print(f"Error processing CSV file: {e}")
         return []
 
-def remove_fully_duplicate_rows(df):
+def remove_fully_duplicate_rows(df, logger=None):
     """Remove rows that are completely identical across all columns, keeping only one copy."""
     original_count = len(df)
     
     # Remove fully duplicate rows (keep='first' keeps the first occurrence)
-    df_no_full_dupes = df.drop_duplicates(keep='first')
+    if TQDM_AVAILABLE and len(df) > 1000:
+        with tqdm(total=1, desc="Removing duplicate rows") as pbar:
+            df_no_full_dupes = df.drop_duplicates(keep='first')
+            pbar.update(1)
+    else:
+        df_no_full_dupes = df.drop_duplicates(keep='first')
     
     removed_count = original_count - len(df_no_full_dupes)
     
     if removed_count > 0:
-        print(f"\nAutomatically removed {removed_count} fully duplicate rows (identical across all columns)")
+        message = f"Automatically removed {removed_count} fully duplicate rows (identical across all columns)"
+        if logger:
+            logger.info(message)
+        print(f"\n{message}")
         print(f"Rows remaining: {len(df_no_full_dupes)}")
     else:
-        print("\nNo fully duplicate rows found.")
+        message = "No fully duplicate rows found"
+        if logger:
+            logger.info(message)
+        print(f"\n{message}.")
     
     return df_no_full_dupes, removed_count
 
-def normalize_urls(df):
+def normalize_urls(df, logger=None):
     """Normalize login_uri by removing trailing slashes and creating a normalized column for comparison."""
     # Memory efficient: modify in place instead of copying when possible
     if 'login_uri' in df.columns:
         # Create a normalized version for comparison (remove trailing slashes)
-        df['login_uri_normalized'] = df['login_uri'].astype(str).str.rstrip('/')
-        print("URLs normalized (trailing slashes removed for duplicate detection)")
+        if TQDM_AVAILABLE and len(df) > 5000:
+            tqdm.pandas(desc="Normalizing URLs")
+            df['login_uri_normalized'] = df['login_uri'].astype(str).progress_apply(lambda x: str(x).rstrip('/'))
+        else:
+            df['login_uri_normalized'] = df['login_uri'].astype(str).str.rstrip('/')
+        message = "URLs normalized (trailing slashes removed for duplicate detection)"
+        if logger:
+            logger.info(message)
+        print(message)
     
     return df
 
@@ -265,7 +440,11 @@ def add_domain_column(df):
     """Add domain column extracted from login_uri_normalized."""
     # Memory efficient: modify in place
     if 'login_uri_normalized' in df.columns:
-        df['domain'] = df['login_uri_normalized'].apply(extract_domain)
+        if TQDM_AVAILABLE and len(df) > 1000:
+            tqdm.pandas(desc="Extracting domains")
+            df['domain'] = df['login_uri_normalized'].progress_apply(extract_domain)
+        else:
+            df['domain'] = df['login_uri_normalized'].apply(extract_domain)
         print("Domain column added for duplicate detection")
     
     return df
@@ -278,7 +457,12 @@ def clean_name_column(df, logger=None):
         return df
     
     # Count entries that will be cleaned
-    entries_with_parentheses = df['name'].str.contains(r'\([^)]*\)', na=False).sum()
+    if TQDM_AVAILABLE and len(df) > 5000:
+        with tqdm(total=1, desc="Checking name column") as pbar:
+            entries_with_parentheses = df['name'].str.contains(r'\([^)]*\)', na=False).sum()
+            pbar.update(1)
+    else:
+        entries_with_parentheses = df['name'].str.contains(r'\([^)]*\)', na=False).sum()
     
     if entries_with_parentheses == 0:
         if logger:
@@ -287,11 +471,21 @@ def clean_name_column(df, logger=None):
         return df
     
     # Clean the name column
-    # Remove everything in parentheses including the parentheses themselves
-    df['name'] = df['name'].str.replace(r'\s*\([^)]*\)\s*', '', regex=True)
-    
-    # Clean up any double spaces and strip whitespace
-    df['name'] = df['name'].str.replace(r'\s+', ' ', regex=True).str.strip()
+    if TQDM_AVAILABLE and len(df) > 5000:
+        with tqdm(total=2, desc="Cleaning name column") as pbar:
+            # Remove everything in parentheses including the parentheses themselves
+            df['name'] = df['name'].str.replace(r'\s*\([^)]*\)\s*', '', regex=True)
+            pbar.update(1)
+            
+            # Clean up any double spaces and strip whitespace
+            df['name'] = df['name'].str.replace(r'\s+', ' ', regex=True).str.strip()
+            pbar.update(1)
+    else:
+        # Remove everything in parentheses including the parentheses themselves
+        df['name'] = df['name'].str.replace(r'\s*\([^)]*\)\s*', '', regex=True)
+        
+        # Clean up any double spaces and strip whitespace
+        df['name'] = df['name'].str.replace(r'\s+', ' ', regex=True).str.strip()
     
     message = f"Cleaned {entries_with_parentheses} entries in name column (removed parentheses content)"
     if logger:
@@ -300,7 +494,7 @@ def clean_name_column(df, logger=None):
     
     return df
 
-def interactive_delete_duplicates(csv_file_path):
+def interactive_delete_duplicates(csv_file_path, logger=None):
     try:
         df = pd.read_csv(csv_file_path)
         original_count = len(df)
@@ -309,14 +503,14 @@ def interactive_delete_duplicates(csv_file_path):
         print("\n" + "=" * 50)
         print("STEP 1: Removing fully duplicate rows")
         print("=" * 50)
-        df, fully_removed_count = remove_fully_duplicate_rows(df)
+        df, fully_removed_count = remove_fully_duplicate_rows(df, logger)
         
         # Normalize URLs for better duplicate detection
         print("\n" + "=" * 50)
         print("STEP 1.5: Normalizing URLs and cleaning names")
         print("=" * 50)
-        df = normalize_urls(df)
-        df = clean_name_column(df)
+        df = normalize_urls(df, logger)
+        df = clean_name_column(df, logger)
         
         required_columns = ['login_uri', 'login_username']
         missing_columns = [col for col in required_columns if col not in df.columns]
@@ -343,7 +537,12 @@ def interactive_delete_duplicates(csv_file_path):
         # Group by both normalized login_uri and login_username
         unique_combinations = duplicate_uri_username_rows[['login_uri_normalized', 'login_username']].drop_duplicates()
         
-        for _, combination in unique_combinations.iterrows():
+        # Use progress bar if many combinations to process
+        combination_iterator = tqdm(unique_combinations.iterrows(), 
+                                   total=len(unique_combinations), 
+                                   desc="Processing duplicate groups") if TQDM_AVAILABLE and len(unique_combinations) > 10 else unique_combinations.iterrows()
+        
+        for _, combination in combination_iterator:
             uri_normalized = combination['login_uri_normalized']
             username = combination['login_username']
             
@@ -430,39 +629,55 @@ def interactive_delete_duplicates(csv_file_path):
         print(f"Error processing CSV file: {e}")
         return None
 
-def automatic_delete_duplicates(csv_file_path):
+def automatic_delete_duplicates(csv_file_path, logger=None, dry_run=False):
     """Automatically delete duplicate login_uri + login_username combinations, keeping only the first occurrence."""
     try:
         df = pd.read_csv(csv_file_path)
         original_count = len(df)
         
+        if dry_run:
+            print("\n🔍 DRY RUN MODE: Previewing changes without modification\n")
+        
         # First, automatically remove fully duplicate rows
         print("\n" + "=" * 50)
         print("STEP 1: Removing fully duplicate rows")
         print("=" * 50)
-        df, fully_removed_count = remove_fully_duplicate_rows(df)
+        if dry_run:
+            df_temp, fully_removed_count = remove_fully_duplicate_rows(df.copy(), logger)
+            print(f"DRY RUN: Would remove {fully_removed_count} fully duplicate rows")
+        else:
+            df, fully_removed_count = remove_fully_duplicate_rows(df, logger)
         
         # Normalize URLs for better duplicate detection
         print("\n" + "=" * 50)
         print("STEP 1.5: Normalizing URLs and cleaning names")
         print("=" * 50)
-        df = normalize_urls(df)
-        df = clean_name_column(df)
+        if dry_run:
+            df_temp = normalize_urls(df_temp, logger)
+            df_temp = clean_name_column(df_temp, logger)
+            working_df = df_temp
+        else:
+            df = normalize_urls(df, logger)
+            df = clean_name_column(df, logger)
+            working_df = df
         
         required_columns = ['login_uri', 'login_username']
-        missing_columns = [col for col in required_columns if col not in df.columns]
+        missing_columns = [col for col in required_columns if col not in working_df.columns]
         
         if missing_columns:
             print(f"Error: Missing columns: {missing_columns}")
             return None, None
         
         # Find rows with duplicate login_uri AND login_username combinations (using normalized URLs)
-        duplicate_uri_username_rows = df[df.duplicated(subset=['login_uri_normalized', 'login_username'], keep=False)]
+        duplicate_uri_username_rows = working_df[working_df.duplicated(subset=['login_uri_normalized', 'login_username'], keep=False)]
         
         if duplicate_uri_username_rows.empty:
             print("\nNo remaining duplicate login_uri + login_username combinations found after removing fully duplicate rows.")
             if fully_removed_count > 0:
-                print(f"Total cleanup: {fully_removed_count} fully duplicate rows removed.")
+                if dry_run:
+                    print(f"DRY RUN: Would clean {fully_removed_count} fully duplicate rows total.")
+                else:
+                    print(f"Total cleanup: {fully_removed_count} fully duplicate rows removed.")
             return df, pd.DataFrame()  # Return empty DataFrame for deleted rows
         
         print("\n" + "=" * 50)
@@ -477,15 +692,18 @@ def automatic_delete_duplicates(csv_file_path):
             return group.loc[[min_length_idx]]
         
         # Group by normalized URI + username and apply the shortest URI selection
-        df_cleaned = df.groupby(['login_uri_normalized', 'login_username'], group_keys=False).apply(keep_shortest_uri_auto).reset_index(drop=True)
+        df_cleaned = working_df.groupby(['login_uri_normalized', 'login_username'], group_keys=False).apply(keep_shortest_uri_auto).reset_index(drop=True)
         
         # Find the rows that were removed
-        removed_indices = set(df.index) - set(df_cleaned.index)
-        deleted_rows = df.loc[list(removed_indices)]
+        removed_indices = set(working_df.index) - set(df_cleaned.index)
+        deleted_rows = working_df.loc[list(removed_indices)]
         
         partial_removed_count = len(deleted_rows)
         
-        print(f"Automatically removed {partial_removed_count} duplicate login_uri + login_username entries (kept shortest URI)")
+        if dry_run:
+            print(f"DRY RUN: Would remove {partial_removed_count} duplicate login_uri + login_username entries (kept shortest URI)")
+        else:
+            print(f"Automatically removed {partial_removed_count} duplicate login_uri + login_username entries (kept shortest URI)")
         
         # Remove the normalized column from final output (it was just for comparison)
         if 'login_uri_normalized' in df_cleaned.columns:
@@ -494,15 +712,25 @@ def automatic_delete_duplicates(csv_file_path):
             deleted_rows = deleted_rows.drop('login_uri_normalized', axis=1)
         
         print(f"\n{'='*50}")
-        print(f"SUMMARY:")
+        if dry_run:
+            print(f"DRY RUN SUMMARY:")
+        else:
+            print(f"SUMMARY:")
         print(f"{'='*50}")
         print(f"Original rows: {original_count}")
-        print(f"Fully duplicate rows removed: {fully_removed_count}")
-        print(f"Partial duplicate rows removed: {partial_removed_count}")
-        print(f"Total rows removed: {fully_removed_count + partial_removed_count}")
-        print(f"Remaining rows: {len(df_cleaned)}")
-        
-        return df_cleaned, deleted_rows
+        if dry_run:
+            print(f"Fully duplicate rows would be removed: {fully_removed_count}")
+            print(f"Partial duplicate rows would be removed: {partial_removed_count}")
+            print(f"Total rows would be removed: {fully_removed_count + partial_removed_count}")
+            print(f"Rows would remain: {len(df_cleaned)}")
+            print(f"\n🔍 This was a DRY RUN - no changes were made to your data.")
+            return df, pd.DataFrame()  # Return original data unchanged
+        else:
+            print(f"Fully duplicate rows removed: {fully_removed_count}")
+            print(f"Partial duplicate rows removed: {partial_removed_count}")
+            print(f"Total rows removed: {fully_removed_count + partial_removed_count}")
+            print(f"Remaining rows: {len(df_cleaned)}")
+            return df_cleaned, deleted_rows
         
     except FileNotFoundError:
         print(f"Error: File '{csv_file_path}' not found.")
@@ -519,7 +747,10 @@ def save_deleted_entries(deleted_df, original_path):
     
     base_name = original_path.rsplit('.', 1)[0]
     extension = original_path.rsplit('.', 1)[1] if '.' in original_path else 'csv'
-    deleted_path = f"{base_name}_deleted_entries.{extension}"
+    
+    # Add timestamp to backup files for multiple backups
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    deleted_path = f"{base_name}_deleted_entries_{timestamp}.{extension}"
     
     try:
         deleted_df.to_csv(deleted_path, index=False)
@@ -528,6 +759,155 @@ def save_deleted_entries(deleted_df, original_path):
     except Exception as e:
         print(f"Error saving deleted entries: {e}")
         return None
+
+def list_backup_files(original_path):
+    """List available backup files for the given original file."""
+    base_name = original_path.rsplit('.', 1)[0]
+    extension = original_path.rsplit('.', 1)[1] if '.' in original_path else 'csv'
+    
+    # Look for backup patterns
+    backup_patterns = [
+        f"{base_name}_deleted_entries_*.{extension}",
+        f"{base_name}_cleaned.{extension}"
+    ]
+    
+    backup_files = []
+    
+    for pattern in backup_patterns:
+        matches = glob(pattern)
+        backup_files.extend(matches)
+    
+    if not backup_files:
+        print(f"No backup files found for: {original_path}")
+        return []
+    
+    print(f"\n💾 Available backup files for {original_path}:")
+    print("=" * 60)
+    
+    backup_files.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+    
+    for i, backup_file in enumerate(backup_files, 1):
+        file_path = Path(backup_file)
+        size_mb = file_path.stat().st_size / (1024 * 1024)
+        mod_time = datetime.datetime.fromtimestamp(file_path.stat().st_mtime)
+        
+        if "deleted_entries" in backup_file:
+            file_type = "Deleted entries backup"
+        elif "cleaned" in backup_file:
+            file_type = "Cleaned data file"
+        else:
+            file_type = "Backup file"
+        
+        print(f"{i:2d}. {file_path.name}")
+        print(f"    Type: {file_type}")
+        print(f"    Size: {size_mb:.1f} MB")
+        print(f"    Modified: {mod_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print()
+    
+    return backup_files
+
+def restore_from_backup(original_path, backup_file=None, interactive=True):
+    """Restore data from backup files."""
+    backup_files = list_backup_files(original_path)
+    
+    if not backup_files:
+        return False
+    
+    if backup_file:
+        # Specific backup file provided
+        if backup_file not in backup_files:
+            print(f"❌ Error: Backup file not found: {backup_file}")
+            return False
+        selected_backup = backup_file
+    elif interactive:
+        # Interactive selection
+        print("\n🔄 Select backup file to restore:")
+        while True:
+            try:
+                choice = input(f"Enter backup number (1-{len(backup_files)}) or 'q' to quit: ").strip()
+                if choice.lower() == 'q':
+                    print("Restore cancelled.")
+                    return False
+                
+                backup_index = int(choice) - 1
+                if 0 <= backup_index < len(backup_files):
+                    selected_backup = backup_files[backup_index]
+                    break
+                else:
+                    print(f"Please enter a number between 1 and {len(backup_files)}")
+            except ValueError:
+                print("Invalid input. Please enter a number or 'q' to quit.")
+    else:
+        # Non-interactive: use most recent backup
+        selected_backup = backup_files[0]
+    
+    # Determine restore type and method
+    base_name = original_path.rsplit('.', 1)[0]
+    extension = original_path.rsplit('.', 1)[1] if '.' in original_path else 'csv'
+    
+    if "deleted_entries" in selected_backup:
+        # This is a deleted entries backup - need to merge with current cleaned file
+        cleaned_file = f"{base_name}_cleaned.{extension}"
+        
+        if not Path(cleaned_file).exists():
+            print(f"❌ Error: Cleaned file not found: {cleaned_file}")
+            print("Cannot restore deleted entries without the cleaned file.")
+            return False
+        
+        print(f"\n🔄 Restoring deleted entries from: {Path(selected_backup).name}")
+        print(f"Merging with cleaned file: {Path(cleaned_file).name}")
+        
+        try:
+            # Read both files
+            deleted_df = pd.read_csv(selected_backup)
+            cleaned_df = pd.read_csv(cleaned_file)
+            
+            # Combine them
+            restored_df = pd.concat([cleaned_df, deleted_df], ignore_index=True)
+            
+            # Create restoration file
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            restore_path = f"{base_name}_restored_{timestamp}.{extension}"
+            
+            restored_df.to_csv(restore_path, index=False)
+            
+            print(f"✅ Successfully restored {len(deleted_df)} deleted entries")
+            print(f"Combined {len(cleaned_df)} cleaned + {len(deleted_df)} deleted = {len(restored_df)} total entries")
+            print(f"Restored data saved to: {restore_path}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error during restoration: {e}")
+            return False
+    
+    elif "cleaned" in selected_backup:
+        # This is a cleaned file - copy it back to original location
+        print(f"\n🔄 Restoring cleaned file: {Path(selected_backup).name}")
+        
+        # Ask for confirmation before overwriting
+        if Path(original_path).exists():
+            print(f"⚠️  Warning: This will overwrite the existing file: {original_path}")
+            if interactive:
+                confirm = input("Continue? (y/N): ").strip().lower()
+                if confirm != 'y':
+                    print("Restore cancelled.")
+                    return False
+        
+        try:
+            # Copy the backup to original location
+            shutil.copy2(selected_backup, original_path)
+            
+            print(f"✅ Successfully restored file to: {original_path}")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error during restoration: {e}")
+            return False
+    
+    else:
+        print(f"❌ Error: Unknown backup file type: {selected_backup}")
+        return False
 
 def find_partial_uri_matches(df):
     """Find rows with partial URI matches but same username and password."""
@@ -565,60 +945,72 @@ def find_partial_uri_matches(df):
     
     return partial_match_groups
 
-def automatic_domain_cleanup(csv_file_path):
+def automatic_domain_cleanup(csv_file_path, logger=None, dry_run=False):
     """Automatically clean up entries with same domain + username, keeping only the first occurrence."""
     try:
         df = pd.read_csv(csv_file_path)
         original_count = len(df)
+        
+        if dry_run:
+            print("\n🔍 DRY RUN MODE: Previewing changes without modification\n")
         
         # Normalize URLs and extract domains
         print("\n" + "=" * 60)
         print("DOMAIN-BASED DUPLICATE CLEANUP")
         print("=" * 60)
         
-        df = normalize_urls(df)
-        df = clean_name_column(df)
-        df = add_domain_column(df)
+        # Work on a copy for dry run
+        working_df = df.copy() if dry_run else df
+        working_df = normalize_urls(working_df, logger)
+        working_df = clean_name_column(working_df, logger)
+        working_df = add_domain_column(working_df)
         
         required_columns = ['login_uri', 'login_username', 'login_password']
-        missing_columns = [col for col in required_columns if col not in df.columns]
+        missing_columns = [col for col in required_columns if col not in working_df.columns]
         
         if missing_columns:
             print(f"Error: Missing columns for domain cleanup: {missing_columns}")
             return None, None
         
         # Check if we have domain column
-        if 'domain' not in df.columns:
+        if 'domain' not in working_df.columns:
             print("Error: Domain extraction failed.")
             return None, None
         
         print("Looking for entries with same domain + username + password combinations...")
         
         # Find duplicates based on domain + username + password
-        domain_credentials_duplicates = df[df.duplicated(subset=['domain', 'login_username', 'login_password'], keep=False)]
+        domain_credentials_duplicates = working_df[working_df.duplicated(subset=['domain', 'login_username', 'login_password'], keep=False)]
         
         if domain_credentials_duplicates.empty:
             print("No duplicate domain + username + password combinations found.")
             # Clean up temporary columns
-            df_cleaned = df.drop(['login_uri_normalized', 'domain'], axis=1, errors='ignore')
-            return df_cleaned, pd.DataFrame()  # Return empty DataFrame for consistency
+            df_cleaned = working_df.drop(['login_uri_normalized', 'domain'], axis=1, errors='ignore')
+            return df, pd.DataFrame()  # Return original data for dry run
         
         print(f"Found {len(domain_credentials_duplicates)} rows with duplicate domain + username + password combinations")
         
         # Show summary of what will be cleaned
         unique_combinations = domain_credentials_duplicates[['domain', 'login_username', 'login_password']].drop_duplicates()
-        print(f"\nWill clean {len(unique_combinations)} unique domain + username + password combinations:")
+        action_word = "Would clean" if dry_run else "Will clean"
+        print(f"\n{action_word} {len(unique_combinations)} unique domain + username + password combinations:")
         
         total_to_remove = 0
-        for _, combo in unique_combinations.iterrows():
+        combo_iterator = tqdm(unique_combinations.iterrows(), 
+                             total=len(unique_combinations), 
+                             desc="Analyzing combinations") if TQDM_AVAILABLE and len(unique_combinations) > 50 else unique_combinations.iterrows()
+        
+        for _, combo in combo_iterator:
             domain = combo['domain']
             username = combo['login_username']
             password_masked = '*' * len(str(combo['login_password']))  # Mask password for security
-            count = len(df[(df['domain'] == domain) & (df['login_username'] == username) & (df['login_password'] == combo['login_password'])])
+            count = len(working_df[(working_df['domain'] == domain) & (working_df['login_username'] == username) & (working_df['login_password'] == combo['login_password'])])
             total_to_remove += (count - 1)  # Will keep 1, remove others
-            print(f"  - Domain: {domain}, Username: {username}, Password: {password_masked} ({count} entries → keep 1, remove {count-1})")
+            action_word = "would keep" if dry_run else "keep"
+            print(f"  - Domain: {domain}, Username: {username}, Password: {password_masked} ({count} entries → {action_word} 1, remove {count-1})")
         
-        print(f"\nSUMMARY: Will remove {total_to_remove} entries total, keeping shortest URI for each domain + username + password combination.")
+        action_word = "Would remove" if dry_run else "Will remove"
+        print(f"\nSUMMARY: {action_word} {total_to_remove} entries total, keeping shortest URI for each domain + username + password combination.")
         
         # Add data loss warnings
         print("\n" + "⚠️" * 50)
@@ -698,18 +1090,23 @@ def automatic_domain_cleanup(csv_file_path):
                     print(f"    Name: {row['name']}")
             print(f"\n  ... and {len(preview_kept) - 5} more entries will be kept")
         
+        if dry_run:
+            print(f"\n🔍 DRY RUN COMPLETE: Would delete {total_to_remove} entries and keep {len(working_df) - total_to_remove} entries.")
+            print("No changes were made to your data.")
+            return df, pd.DataFrame()
+        
         # Ask for user confirmation before proceeding
         print(f"\n{'='*60}")
         print("PROCEED WITH DELETION?")
         print(f"{'='*60}")
-        print(f"This will delete {total_to_remove} entries and keep {len(df) - total_to_remove} entries.")
+        print(f"This will delete {total_to_remove} entries and keep {len(working_df) - total_to_remove} entries.")
         confirmation = input("Type 'DELETE' to confirm, or 'n' to cancel: ").strip()
         
         if confirmation.upper() != 'DELETE':
             print("Domain cleanup cancelled by user.")
             # Clean up temporary columns
-            df_cleaned = df.drop(['login_uri_normalized', 'domain'], axis=1, errors='ignore')
-            return df_cleaned, pd.DataFrame()
+            df_cleaned = working_df.drop(['login_uri_normalized', 'domain'], axis=1, errors='ignore')
+            return df, pd.DataFrame()
         
         print("\nProceeding with domain cleanup...")
         
@@ -720,11 +1117,11 @@ def automatic_domain_cleanup(csv_file_path):
             return group.loc[[min_length_idx]]
         
         # Group by domain + username + password and apply the shortest URI selection
-        df_cleaned = df.groupby(['domain', 'login_username', 'login_password'], group_keys=False).apply(keep_shortest_uri).reset_index(drop=True)
+        df_cleaned = working_df.groupby(['domain', 'login_username', 'login_password'], group_keys=False).apply(keep_shortest_uri).reset_index(drop=True)
         
         # Find the rows that were removed
-        removed_indices = set(df.index) - set(df_cleaned.index)
-        deleted_rows = df.loc[list(removed_indices)]
+        removed_indices = set(working_df.index) - set(df_cleaned.index)
+        deleted_rows = working_df.loc[list(removed_indices)]
         
         removed_count = len(deleted_rows)
         
@@ -773,6 +1170,67 @@ def save_cleaned_csv(df, original_path, logger=None):
         print(f"Error: {error_msg}")
         return None
 
+def load_config(config_path=None):
+    """Load configuration from file."""
+    default_config = {
+        'mode': 'analyze',
+        'verbose': False,
+        'dry_run': False,
+        'output': None
+    }
+    
+    # Try to find config file
+    config_locations = [
+        config_path,  # User specified
+        os.path.expanduser('~/.clean_pass_config.json'),  # Home directory
+        './clean_pass_config.json',  # Current directory
+        './.clean_pass.json'  # Alternative name
+    ]
+    
+    for config_file in config_locations:
+        if config_file and Path(config_file).exists():
+            try:
+                with open(config_file, 'r') as f:
+                    user_config = json.load(f)
+                    # Merge user config with defaults
+                    config = {**default_config, **user_config}
+                    print(f"📄 Loaded configuration from: {config_file}")
+                    return config, config_file
+            except (json.JSONDecodeError, IOError) as e:
+                print(f"⚠️  Warning: Could not load config file {config_file}: {e}")
+                continue
+    
+    return default_config, None
+
+def save_config_template(config_path=None):
+    """Save a configuration template file."""
+    if not config_path:
+        config_path = os.path.expanduser('~/.clean_pass_config.json')
+    
+    template_config = {
+        "_comment": "Configuration file for clean_pass.py - remove this comment line before use",
+        "mode": "analyze",
+        "verbose": False,
+        "dry_run": False,
+        "output": None,
+        "_settings_info": {
+            "mode": "Options: analyze, interactive, auto",
+            "verbose": "Boolean: true for detailed logging",
+            "dry_run": "Boolean: true to preview changes without modifying files",
+            "output": "String: custom output file path (null for auto-generated)"
+        }
+    }
+    
+    try:
+        with open(config_path, 'w') as f:
+            json.dump(template_config, f, indent=2)
+        print(f"✅ Configuration template saved to: {config_path}")
+        print("Edit this file to set your default preferences.")
+        return config_path
+    except IOError as e:
+        print(f"❌ Error saving config template: {e}")
+        return None
+
 def parse_arguments():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
@@ -783,6 +1241,7 @@ Examples:
   %(prog)s -f export.csv --mode interactive --verbose
   %(prog)s -f export.csv --mode auto --dry-run
   %(prog)s -f export.csv --mode analyze
+  %(prog)s --save-config  # Create configuration template
 """
     )
     
@@ -816,33 +1275,101 @@ Examples:
         help='Output file path (default: auto-generated)'
     )
     
+    parser.add_argument(
+        '--config',
+        help='Path to configuration file'
+    )
+    
+    parser.add_argument(
+        '--save-config',
+        action='store_true',
+        help='Save a configuration file template and exit'
+    )
+    
+    parser.add_argument(
+        '--undo',
+        help='Restore from backup files (provide original file path)'
+    )
+    
+    parser.add_argument(
+        '--list-backups',
+        help='List available backup files for the specified CSV file'
+    )
+    
     return parser.parse_args()
 
 def main():
     """Main entry point for the script."""
     args = parse_arguments()
-    logger = setup_logging(args.verbose)
+    
+    # Handle config template creation
+    if args.save_config:
+        config_path = args.config if args.config else None
+        save_config_template(config_path)
+        return
+    
+    # Handle backup operations
+    if args.list_backups:
+        list_backup_files(args.list_backups)
+        return
+    
+    if args.undo:
+        success = restore_from_backup(args.undo)
+        if success:
+            print("✅ Restore operation completed successfully.")
+        else:
+            print("❌ Restore operation failed.")
+            sys.exit(1)
+        return
+    
+    # Load configuration
+    config, config_file = load_config(args.config)
+    
+    # Command line arguments override config file settings
+    if hasattr(args, 'mode') and args.mode != 'analyze':  # Only override if explicitly set
+        config['mode'] = args.mode
+    if args.verbose:
+        config['verbose'] = True
+    if args.dry_run:
+        config['dry_run'] = True
+    if args.output:
+        config['output'] = args.output
+    
+    # Ensure file argument is always from command line
+    if not hasattr(args, 'file') or not args.file:
+        print("❌ Error: --file argument is required")
+        sys.exit(1)
+    
+    logger = setup_logging(config['verbose'])
     
     try:
         # Validate input file
         csv_file = args.file
         logger.info(f"Processing file: {csv_file}")
         
-        print("CSV Columns:")
+        if config_file:
+            logger.info(f"Using configuration from: {config_file}")
+            logger.debug(f"Active config: {config}")
+        
+        # Comprehensive CSV validation
+        try:
+            validate_csv_file(csv_file, logger)
+            print("✓ CSV validation passed")
+        except (FileNotFoundError, ValueError, CSVValidationError) as e:
+            logger.error(f"CSV validation failed: {e}")
+            print(f"❌ Error: {e}")
+            sys.exit(1)
+        except Exception as e:
+            logger.error(f"Unexpected validation error: {e}")
+            print(f"❌ Unexpected error during validation: {e}")
+            sys.exit(1)
+        
+        print("\nCSV Columns:")
         print("-" * 40)
         columns = read_csv_and_print_columns(csv_file, logger)
         
         if columns is None:
             logger.error("Failed to read CSV file")
-            sys.exit(1)
-        
-        # Required columns check
-        required_columns = ['login_uri', 'login_username']
-        missing_columns = [col for col in required_columns if col not in columns]
-        
-        if missing_columns:
-            logger.error(f"Missing required columns: {missing_columns}")
-            print(f"Error: Missing required columns: {missing_columns}")
             sys.exit(1)
         
         # Analysis phase
@@ -865,7 +1392,7 @@ def main():
             print(f"\nReturned {len(duplicate_uri_username_list)} rows with duplicate URI and username for further filtering.")
         
         # Handle different modes
-        if args.mode == 'analyze':
+        if config['mode'] == 'analyze':
             print("\nAnalysis complete. Use --mode to specify cleaning operation.")
             return
         
@@ -877,30 +1404,26 @@ def main():
         cleaned_df = None
         deleted_df = None
         
-        if args.mode == 'interactive':
-            if args.dry_run:
+        if config['mode'] == 'interactive':
+            if config['dry_run']:
                 print("DRY RUN MODE: Cannot use dry-run with interactive mode")
                 return
             print("\nStarting interactive deletion...")
-            cleaned_df = interactive_delete_duplicates(csv_file)
+            cleaned_df = interactive_delete_duplicates(csv_file, logger)
         
-        elif args.mode == 'auto':
+        elif config['mode'] == 'auto':
             print("\nStarting automatic domain-based cleanup...")
-            if args.dry_run:
-                print("DRY RUN MODE: No changes will be made")
-                # TODO: Implement dry run logic
-                return
-            result = automatic_domain_cleanup(csv_file)
+            result = automatic_domain_cleanup(csv_file, logger, config['dry_run'])
             if result and len(result) == 2:
                 cleaned_df, deleted_df = result
         
-        # Save results
-        if cleaned_df is not None:
+        # Save results (skip in dry run mode)
+        if cleaned_df is not None and not config['dry_run']:
             if deleted_df is not None and not deleted_df.empty:
                 save_deleted_entries(deleted_df, csv_file)
             
-            if args.output:
-                output_path = args.output
+            if config['output']:
+                output_path = config['output']
                 cleaned_df.to_csv(output_path, index=False)
                 logger.info(f"Cleaned data saved to: {output_path}")
                 print(f"\nCleaned CSV saved as: {output_path}")
@@ -908,6 +1431,8 @@ def main():
                 output_path = save_cleaned_csv(cleaned_df, csv_file, logger)
                 if output_path:
                     logger.info(f"Cleaned data saved to: {output_path}")
+        elif config['dry_run']:
+            print("🔍 DRY RUN: No files were saved.")
         
     except KeyboardInterrupt:
         logger.info("Operation cancelled by user")

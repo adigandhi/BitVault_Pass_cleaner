@@ -19,6 +19,11 @@ When migrating to Bitwarden from other password managers or consolidating multip
 - **⚙️ Multiple Cleaning Modes**:
   - Interactive mode (manual selection)
   - Auto mode (automatic domain-based cleanup)
+  - Analyze mode (analysis only)
+- **🔍 Dry-Run Mode**: Preview changes without modifying files
+- **📁 Configuration Support**: Save default settings in config files
+- **📊 Progress Indicators**: Visual progress bars for long-running operations
+- **🔄 Undo Functionality**: Restore from backup files with interactive selection
 - **🔒 Security First**: Masks passwords in output, never logs sensitive data
 - **💾 Backup Protection**: Automatically saves deleted entries for recovery
 - **📊 Detailed Reporting**: Shows what was cleaned and statistics
@@ -29,6 +34,11 @@ When migrating to Bitwarden from other password managers or consolidating multip
 
 ```bash
 pip install pandas
+```
+
+**Optional (for enhanced progress bars):**
+```bash
+pip install tqdm
 ```
 
 ### Basic Usage
@@ -45,21 +55,19 @@ pip install pandas
    - `auto` - Automatic domain-based deduplication
    - `analyze` - Analysis only (default)
 
-### Example Session
+### Example Sessions
 
+#### Basic Cleaning
 ```
 $ python clean_pass.py -f bitwarden_export.csv --mode interactive
+
+📄 Loaded configuration from: ~/.clean_pass_config.json
+✓ CSV validation passed
 
 CSV Columns:
 1. folder
 2. favorite
-3. type
-4. name
-5. notes
-6. fields
-7. reprompt
-8. login_uri
-9. login_username
+...
 10. login_password
 11. login_totp
 
@@ -68,23 +76,7 @@ Checking for duplicate login_uri entries:
 ==================================================
 Found 45 rows with duplicate login_uri values.
 
-==================================================
-STEP 1: Removing fully duplicate rows
-==================================================
-Automatically removed 12 fully duplicate rows
-
-==================================================
-STEP 1.5: Normalizing URLs and cleaning names
-==================================================
-✓ Cleaned 23 entries in name column (removed parentheses content)
-URLs normalized (trailing slashes removed for duplicate detection)
-
-==================================================
-STEP 2: Interactive partial duplicate cleanup
-==================================================
-Found 33 rows with duplicate login_uri + login_username combinations
-
-[Interactive selection process...]
+📊 Processing duplicate groups: 100%|████████| 15/15 [00:02<00:00,  7.2it/s]
 
 SUMMARY:
 ========================================
@@ -95,7 +87,47 @@ Total rows removed: 40
 Remaining rows: 1,207
 
 Cleaned CSV saved as: bitwarden_export_cleaned.csv
-Deleted entries saved to: bitwarden_export_deleted_entries.csv
+Deleted entries saved to: bitwarden_export_deleted_entries_20241201_143022.csv
+```
+
+#### Dry Run Mode
+```
+$ python clean_pass.py -f bitwarden_export.csv --mode auto --dry-run
+
+🔍 DRY RUN MODE: Previewing changes without modification
+
+DRY RUN SUMMARY:
+================
+Original rows: 1,247
+Would remove: 40 entries
+Would keep: 1,207 entries
+
+🔍 This was a DRY RUN - no changes were made to your data.
+🔍 DRY RUN: No files were saved.
+```
+
+#### Configuration and Undo
+```
+$ python clean_pass.py --save-config
+✅ Configuration template saved to: ~/.clean_pass_config.json
+
+$ python clean_pass.py --list-backups bitwarden_export.csv
+
+💾 Available backup files for bitwarden_export.csv:
+============================================================
+ 1. bitwarden_export_deleted_entries_20241201_143022.csv
+    Type: Deleted entries backup
+    Size: 0.2 MB
+    Modified: 2024-12-01 14:30:22
+
+ 2. bitwarden_export_cleaned.csv
+    Type: Cleaned data file
+    Size: 1.8 MB
+    Modified: 2024-12-01 14:30:20
+
+$ python clean_pass.py --undo bitwarden_export.csv
+🔄 Restoring deleted entries from: bitwarden_export_deleted_entries_20241201_143022.csv
+✅ Successfully restored 40 deleted entries
 ```
 
 ## 📖 Detailed Usage
@@ -132,7 +164,63 @@ The script follows a multi-step approach:
 | File | Description |
 |------|-------------|
 | `original_cleaned.csv` | Your cleaned password database |
-| `original_deleted_entries.csv` | Backup of all deleted entries |
+| `original_deleted_entries_YYYYMMDD_HHMMSS.csv` | Timestamped backup of deleted entries |
+
+## 🚀 Advanced Features
+
+### Configuration Files
+
+Create a configuration file to set default preferences:
+
+```bash
+python clean_pass.py --save-config
+```
+
+This creates `~/.clean_pass_config.json`:
+
+```json
+{
+  "mode": "analyze",
+  "verbose": false,
+  "dry_run": false,
+  "output": null
+}
+```
+
+### Dry-Run Mode
+
+Preview changes without modifying files:
+
+```bash
+python clean_pass.py -f export.csv --mode auto --dry-run
+```
+
+### Progress Indicators
+
+For large files (1000+ entries), the script automatically shows progress bars:
+- **File loading**: Shows loading progress for files >10MB
+- **URL normalization**: Progress for >5000 entries
+- **Domain extraction**: Progress for >1000 entries
+- **Duplicate processing**: Progress for >10 duplicate groups
+
+*Note: Requires `tqdm` package for enhanced progress bars. Falls back to simple indicators if not available.*
+
+### Backup and Restore
+
+List available backups:
+```bash
+python clean_pass.py --list-backups export.csv
+```
+
+Restore from backups:
+```bash
+python clean_pass.py --undo export.csv
+```
+
+The restore function can:
+- **Merge deleted entries** back with cleaned data
+- **Restore cleaned files** to original location
+- **Interactive selection** of which backup to restore
 
 ## 🔧 Core Functions
 
@@ -178,17 +266,17 @@ The script follows a multi-step approach:
 
 ### High Priority Fixes
 
-- [ ] **Implement proper logging** instead of print statements  
-- [ ] **Add data validation** for CSV structure before processing
-- [ ] **Better error handling** with specific error messages
+- [x] **Implement proper logging** instead of print statements ✅  
+- [x] **Add data validation** for CSV structure before processing ✅
+- [x] **Better error handling** with specific error messages ✅
 
 ### Feature Enhancements
 
-- [ ] **Add dry-run mode** to preview changes without modification
+- [x] **Add dry-run mode** to preview changes without modification ✅
 - [ ] **Support for different CSV formats** (1Password, LastPass, etc.)
-- [ ] **Configuration file support** for default settings
-- [ ] **Progress bars** for long-running operations
-- [ ] **Undo functionality** to restore from backup files
+- [x] **Configuration file support** for default settings ✅
+- [x] **Progress bars** for long-running operations ✅
+- [x] **Undo functionality** to restore from backup files ✅
 
 ### Code Quality Improvements
 
@@ -231,4 +319,3 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ---
 
 **⚠️ Disclaimer**: This tool modifies your password data. Always backup your original files and test on a small dataset first. The authors are not responsible for any data loss.
-
